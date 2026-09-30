@@ -385,14 +385,26 @@ void ST7789::init_tft(const Config& config)
     dma_tx = dma_claim_unused_channel(true);
 
     dma_channel_config dma_config = dma_channel_get_default_config(dma_tx);
-    channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_8);
+    channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_16);
     channel_config_set_dreq(&dma_config, spi_get_index(spi_num) ? DREQ_SPI1_TX : DREQ_SPI0_TX);
-    dma_channel_configure(dma_tx, &dma_config, &spi_get_hw(spi_num)->dr, oled_dma[0], get_buffer_size(), false);
+    dma_channel_configure(dma_tx, &dma_config, &spi_get_hw(spi_num)->dr, oled_dma[0], get_buffer_size() / 2, false);
+}
+
+static inline void set_spi_bits(spi_inst_t* spi, ST7789::SPIMode mode, uint data_bits)
+{
+    spi_cpol_t cpol = (mode == ST7789::SPIMode::Mode2 || mode == ST7789::SPIMode::Mode3) ? SPI_CPOL_1 : SPI_CPOL_0;
+    spi_cpha_t cpha = (mode == ST7789::SPIMode::Mode1 || mode == ST7789::SPIMode::Mode3) ? SPI_CPHA_1 : SPI_CPHA_0;
+    spi_set_format(spi, data_bits, cpol, cpha, SPI_MSB_FIRST);
 }
 
 void ST7789::flush_dma(uint8_t* ptr, size_t len)
 {
     dma_channel_wait_for_finish_blocking(dma_tx);
+    while (spi_is_busy(spi_num))
+        tight_loop_contents();
+    // Zurück auf 8 Bit für Kommandos
+    set_spi_bits(spi_num, spi_mode, 8);
+
     gpio_put(spi_cs, 1); // CS deaktivieren nach Transfer
     sleep_us(10);        // Kurze Pause, um sicherzustellen, dass CS korrekt erkannt wird
 
@@ -457,8 +469,9 @@ void ST7789::flush_dma(uint8_t* ptr, size_t len)
     spi_write_blocking(spi_num, (const uint8_t[]){CMD_RAMWR}, 1);
     gpio_put(spi_dc, WRITE_DATA);
 
-    // DMA Transfer
-    dma_channel_transfer_from_buffer_now(dma_tx, ptr, len);
+    // Auf 16 Bit schalten & DMA starten (len / 2 Halfwords!)
+    set_spi_bits(spi_num, spi_mode, 16);
+    dma_channel_transfer_from_buffer_now(dma_tx, ptr, len / 2);
 }
 
 void ST7789::refresh()
@@ -526,13 +539,11 @@ void ST7789::clear(pplib::grafix::Color color)
         memset(get_buffer(), color565 & 0xff, get_buffer_size());
         return;
     }
-    uint16_t nativeColor = (color565 >> 8) | (color565 << 8); // Byte swap for SPI transmission
-
     uint16_t* buffer = (uint16_t*)get_buffer();
 
     for (int y = 0; y < my_height; y++) {
         for (int x = 0; x < my_width; x++) {
-            buffer[y * my_width + x] = nativeColor;
+            buffer[y * my_width + x] = color565;
         }
     }
 }
